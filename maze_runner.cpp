@@ -4,9 +4,13 @@
 #include <stack>
 #include <thread>
 #include <chrono>
-
+#include <mutex>
 // Representação do labirinto
 using Maze = std::vector<std::vector<char>>;
+
+std::mutex maze_mutex;
+std::mutex exit_mutex;
+bool exit_found = false;
 
 // Estrutura para representar uma posição no labirinto
 struct Position {
@@ -118,82 +122,88 @@ bool is_valid_position(int row, int col) {
 
 // Função principal para navegar pelo labirinto
 bool walk(Position pos) {
-    // TODO: Implemente a lógica de navegação aqui
-    // 1. Marque a posição atual como visitada (maze[pos.row][pos.col] = '.')
-    // 2. Chame print_maze() para mostrar o estado atual do labirinto
-    // 3. Adicione um pequeno atraso para visualização:
-    //    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    // 4. Verifique se a posição atual é a saída (maze[pos.row][pos.col] == 's')
-    //    Se for, retorne true
-    // 5. Verifique as posições adjacentes (cima, baixo, esquerda, direita)
-    //    Para cada posição adjacente:
-    //    a. Se for uma posição válida (use is_valid_position()), adicione-a à pilha valid_positions
-    // 6. Enquanto houver posições válidas na pilha (!valid_positions.empty()):
-    //    a. Remova a próxima posição da pilha (valid_positions.top() e valid_positions.pop())
-    //    b. Chame walk recursivamente para esta posição
-    //    c. Se walk retornar true, propague o retorno (retorne true)
-    // 7. Se todas as posições foram exploradas sem encontrar a saída, retorne false
-    // Se já estivermos em 's', retornamos true
-    if (maze[pos.row][pos.col] == 's') {
-        return true;
+    {
+        std::lock_guard<std::mutex> lock(exit_mutex);
+        if (exit_found) return true;
     }
 
-    // Marca posição atual como 'o' (posição corrente)
-    char backup = maze[pos.row][pos.col];
-    maze[pos.row][pos.col] = 'o';
-
-    // Imprime o labirinto e aguarda para visualização
-    print_maze();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Marca a posição como explorada ('.'), para não revisitar
-    maze[pos.row][pos.col] = '.';
-
-    // Se o backup era 's', quer dizer que acabamos de chegar na saída
-    if (backup == 's') {
-        return true;
-    }
-
-    // Verifica posições adjacentes (cima, baixo, esquerda, direita)
-    // e se forem válidas, empilha
-    // Cima
-    if (is_valid_position(pos.row - 1, pos.col)) {
-        valid_positions.push({pos.row - 1, pos.col});
-    }
-    // Baixo
-    if (is_valid_position(pos.row + 1, pos.col)) {
-        valid_positions.push({pos.row + 1, pos.col});
-    }
-    // Esquerda
-    if (is_valid_position(pos.row, pos.col - 1)) {
-        valid_positions.push({pos.row, pos.col - 1});
-    }
-    // Direita
-    if (is_valid_position(pos.row, pos.col + 1)) {
-        valid_positions.push({pos.row, pos.col + 1});
-    }
-
-    //Enquanto houver posições válidas na pilha, exploramos
-    while (!valid_positions.empty()) {
-        Position next_pos = valid_positions.top();
-        valid_positions.pop();
-
-        if (walk(next_pos)) {
+    // Marca posição atual como 'o'
+    {
+        std::lock_guard<std::mutex> lock(maze_mutex);
+        if (maze[pos.row][pos.col] == 's') {
+            exit_found = true;
             return true;
+        }
+        if (maze[pos.row][pos.col] != 'e') {
+            maze[pos.row][pos.col] = 'o';
         }
     }
 
-    //Se esgotarmos todas as posições sem achar 's', retorna false
-    return false;
+    print_maze();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    {
+        std::lock_guard<std::mutex> lock(maze_mutex);
+        if (maze[pos.row][pos.col] != 'e') {
+            maze[pos.row][pos.col] = '.';
+        }
+    }
+
+    std::vector<Position> next_positions;
+
+    // Cima
+    if (is_valid_position(pos.row - 1, pos.col)) {
+        next_positions.push_back({pos.row - 1, pos.col});
+    }
+    // Baixo
+    if (is_valid_position(pos.row + 1, pos.col)) {
+        next_positions.push_back({pos.row + 1, pos.col});
+    }
+    // Esquerda
+    if (is_valid_position(pos.row, pos.col - 1)) {
+        next_positions.push_back({pos.row, pos.col - 1});
+    }
+    // Direita
+    if (is_valid_position(pos.row, pos.col + 1)) {
+        next_positions.push_back({pos.row, pos.col + 1});
+    }
+
+    std::vector<std::thread> threads;
+
+    for (size_t i = 1; i < next_positions.size(); ++i) {
+        threads.emplace_back(walk, next_positions[i]);
+    }
+
+    bool found = false;
+    if (!next_positions.empty()) {
+        found = walk(next_positions[0]);
+    }
+
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+
+    return found;
 }
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Uso: " << argv[0] << " <arquivo_do_labirinto>" << std::endl;
+        return 1;
+    }
+
     Position initial_pos = load_maze(argv[1]);
     if (initial_pos.row == -1 || initial_pos.col == -1) {
         std::cerr << "Posição inicial não encontrada ou erro ao carregar o labirinto." << std::endl;
         return 1;
     }
 
-    bool exit_found = walk(initial_pos);
+    // Inicia a exploração em uma thread separada
+    std::thread main_thread(walk, initial_pos);
+    main_thread.join();
+
+    // Usa a variável global exit_found
     if (exit_found) {
         std::cout << "Saída encontrada!" << std::endl;
     } else {
@@ -202,6 +212,7 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
 
 // Nota sobre o uso de std::this_thread::sleep_for:
 // 
